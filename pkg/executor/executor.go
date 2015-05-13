@@ -684,7 +684,7 @@ func (k *KubernetesExecutor) Shutdown(driver bindings.ExecutorDriver) {
 // assumes that caller has obtained state lock
 func (k *KubernetesExecutor) doShutdown(driver bindings.ExecutorDriver) {
 	defer func() {
-		log.Exit("exiting with unclean shutdown: %v", recover())
+		log.Exitf("exiting with unclean shutdown: %v", recover())
 	}()
 
 	(&k.state).transitionTo(terminalState)
@@ -797,6 +797,7 @@ func (k *KubernetesExecutor) sendLoop() {
 				panic("someone closed the outgoing channel")
 			}
 			if status, err := sender(); err == nil {
+				log.Info("sender ran")
 				continue
 			} else {
 				log.Error(err)

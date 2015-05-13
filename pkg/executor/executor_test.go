@@ -5,8 +5,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
+	"github.com/gogo/protobuf/proto"
 	"github.com/golang/glog"
 	bindings "github.com/mesos/mesos-go/executor"
+	mesos "github.com/mesos/mesos-go/mesosproto"
+	mutil "github.com/mesos/mesos-go/mesosutil"
+	"github.com/mesosphere/kubernetes-mesos/pkg/executor/messages"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 type suicideTracker struct {
@@ -46,6 +53,45 @@ func (t *suicideTracker) makeJumper(_ jumper) jumper {
 			atomic.AddUint32(t.jumps, 1)
 		}
 	})
+}
+
+type MockExecutorDriver struct {
+	mock.Mock
+}
+
+func (m *MockExecutorDriver) Start() (mesos.Status, error) {
+	args := m.Called()
+	return args.Get(0).(mesos.Status), args.Error(1)
+}
+
+func (m *MockExecutorDriver) Stop() (mesos.Status, error) {
+	args := m.Called()
+	return args.Get(0).(mesos.Status), args.Error(1)
+}
+
+func (m *MockExecutorDriver) Abort() (mesos.Status, error) {
+	args := m.Called()
+	return args.Get(0).(mesos.Status), args.Error(1)
+}
+
+func (m *MockExecutorDriver) Join() (mesos.Status, error) {
+	args := m.Called()
+	return args.Get(0).(mesos.Status), args.Error(1)
+}
+
+func (m *MockExecutorDriver) Run() (mesos.Status, error) {
+	args := m.Called()
+	return args.Get(0).(mesos.Status), args.Error(1)
+}
+
+func (m *MockExecutorDriver) SendStatusUpdate(status *mesos.TaskStatus) (mesos.Status, error) {
+	args := m.Called(status)
+	return args.Get(0).(mesos.Status), args.Error(1)
+}
+
+func (m *MockExecutorDriver) SendFrameworkMessage(message string) (mesos.Status, error) {
+	args := m.Called(message)
+	return args.Get(0).(mesos.Status), args.Error(1)
 }
 
 func TestSuicide_zeroTimeout(t *testing.T) {
@@ -178,4 +224,96 @@ func TestSuicide_WithTasks(t *testing.T) {
 	} else {
 		glog.Infoln("jumps verified") // glog so we get a timestamp
 	}
+}
+
+func TestRegistered(t *testing.T) {
+	driver := new(MockExecutorDriver)
+	fakeDocker := &dockertools.FakeDockerClient{}
+	updates := make(chan interface{}, 10)
+	config := Config{
+		Docker:  fakeDocker,
+		Updates: updates,
+	}
+	executorInfo := &mesos.ExecutorInfo{}
+	frameworkInfo := &mesos.FrameworkInfo{}
+	slaveInfo := &mesos.SlaveInfo{}
+
+	k := New(config)
+	k.Init(driver)
+	k.Registered(driver, executorInfo, frameworkInfo, slaveInfo)
+
+	assert.True(t, k.isConnected())
+}
+
+func TestLaunchTask(t *testing.T) {
+	taskId := mutil.NewTaskID("task1")
+
+	statusUpdate := &mesos.TaskStatus{
+		TaskId:  taskId,
+		State:   mesos.TaskState_TASK_STARTING.Enum(),
+		Message: proto.String(messages.CreateBindingSuccess),
+	}
+
+	driver := new(MockExecutorDriver)
+	driver.On("SendStatusUpdate", statusUpdate).Return(mesos.Status_DRIVER_RUNNING, nil)
+	driver.On("Stop").Return(mesos.Status_DRIVER_STOPPED, nil)
+
+	fakeDocker := &dockertools.FakeDockerClient{}
+	config := Config{
+		Docker:          fakeDocker,
+		Updates:         make(chan interface{}, 10),
+		KubeletFinished: make(chan struct{}),
+	}
+	executorInfo := &mesos.ExecutorInfo{}
+	frameworkInfo := &mesos.FrameworkInfo{}
+	slaveInfo := &mesos.SlaveInfo{}
+
+	k := New(config)
+	k.Init(driver)
+	k.Registered(driver, executorInfo, frameworkInfo, slaveInfo)
+
+	taskInfo := &mesos.TaskInfo{
+		TaskId: taskId,
+		Data: 
+	}
+
+	k.LaunchTask(driver, taskInfo)
+
+	k.Shutdown(driver)
+
+	driver.AssertExpectations(t)
+}
+
+func TestLaunchTask_notConnected(t *testing.T) {
+	taskId := mutil.NewTaskID("task1")
+
+	statusUpdate := &mesos.TaskStatus{
+		TaskId:  taskId,
+		State:   mesos.TaskState_TASK_FAILED.Enum(),
+		Message: proto.String(messages.ExecutorUnregistered),
+	}
+
+	driver := new(MockExecutorDriver)
+	driver.On("SendStatusUpdate", statusUpdate).Return(mesos.Status_DRIVER_RUNNING, nil)
+	driver.On("Stop").Return(mesos.Status_DRIVER_STOPPED, nil)
+
+	fakeDocker := &dockertools.FakeDockerClient{}
+	config := Config{
+		Docker:          fakeDocker,
+		Updates:         make(chan interface{}, 10),
+		KubeletFinished: make(chan struct{}),
+	}
+
+	k := New(config)
+	k.Init(driver)
+
+	taskInfo := &mesos.TaskInfo{
+		TaskId: taskId,
+	}
+
+	k.LaunchTask(driver, taskInfo)
+
+	k.Shutdown(driver)
+
+	driver.AssertExpectations(t)
 }
